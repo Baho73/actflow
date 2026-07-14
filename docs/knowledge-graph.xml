@@ -1,0 +1,136 @@
+<KnowledgeGraph>
+  <Project NAME="ActFlow" VERSION="1.0.0">
+    <keywords>payments, projects, legal-entity, acts, closing-documents, bank-statement, pdf-parsing, dashboard</keywords>
+    <annotation>Учёт оплат, проектов и закрывающих документов: выписка → оплаты клиентов → привязка к проектам → статусы актов → дашборд. Домен отделён от БД и HTTP.</annotation>
+
+    <M-PARSER NAME="StatementParser" TYPE="CORE_LOGIC" LAYER="DOMAIN" STATUS="planned">
+      <purpose>PDF-выписка → список сырых операций (без бизнес-смысла)</purpose>
+      <path>backend/app/domain/parser.py</path>
+      <depends>none</depends>
+      <verification-ref>V-M-PARSER</verification-ref>
+      <annotations>
+        <fn-parse_statement PURPOSE="bytes → list[RawOperation]; склейка назначений, чистка колонтитулов" />
+        <type-RawOperation PURPOSE="date, amount, direction, doc_number, counterparty, inn, purpose_text" />
+        <class-StatementFormatError PURPOSE="Файл не выписка / нет текстового слоя" />
+      </annotations>
+    </M-PARSER>
+
+    <M-CLASSIFY NAME="OperationClassifier" TYPE="CORE_LOGIC" LAYER="DOMAIN" STATUS="planned">
+      <purpose>Оплата клиента или посторонняя операция (налог/комиссия/перевод себе/возврат)</purpose>
+      <path>backend/app/domain/classify.py</path>
+      <depends>M-PARSER</depends>
+      <verification-ref>V-M-CLASSIFY</verification-ref>
+      <annotations>
+        <fn-classify_operation PURPOSE="RawOperation → kind + причина отсева" />
+      </annotations>
+    </M-CLASSIFY>
+
+    <M-EXTRACT NAME="PaymentExtractor" TYPE="CORE_LOGIC" LAYER="DOMAIN" STATUS="planned">
+      <purpose>Назначение платежа → счета, договор, тип услуги</purpose>
+      <path>backend/app/domain/extract.py</path>
+      <depends>none</depends>
+      <verification-ref>V-M-EXTRACT</verification-ref>
+      <annotations>
+        <fn-extract_payment_details PURPOSE="Текст → (invoice_numbers[], contract_number?, service_stage?)" />
+        <export-SERVICE_DICTIONARY PURPOSE="Словарь услуг агентства" />
+      </annotations>
+    </M-EXTRACT>
+
+    <M-BINDING NAME="ProjectBinding" TYPE="CORE_LOGIC" LAYER="DOMAIN" STATUS="planned">
+      <purpose>Привязка оплаты к проекту по видимому правилу; неоднозначное → «требует привязки»</purpose>
+      <path>backend/app/domain/binding.py</path>
+      <depends>M-EXTRACT</depends>
+      <verification-ref>V-M-BINDING</verification-ref>
+      <annotations>
+        <fn-bind_payment PURPOSE="by_contract → by_client_service → manual → unbound" />
+        <type-BindingMethod PURPOSE="Способ привязки хранится и виден пользователю" />
+      </annotations>
+    </M-BINDING>
+
+    <M-ACTSTATUS NAME="ActStatus" TYPE="CORE_LOGIC" LAYER="DOMAIN" STATUS="planned">
+      <purpose>Статус акта — производная величина (не хранится): not_sent / awaiting_signature / closed / needs_attention</purpose>
+      <path>backend/app/domain/act_status.py</path>
+      <depends>none</depends>
+      <verification-ref>V-M-ACTSTATUS</verification-ref>
+      <annotations>
+        <fn-compute_act_status PURPOSE="(флаги, дата оплаты, today, sla_days) → статус" />
+        <type-ActStatus PURPOSE="Перечисление статусов" />
+      </annotations>
+    </M-ACTSTATUS>
+
+    <M-SUMMARY NAME="Summary" TYPE="CORE_LOGIC" LAYER="DOMAIN" STATUS="planned">
+      <purpose>Агрегаты дашборда; инвариант closed + open == total</purpose>
+      <path>backend/app/domain/summary.py</path>
+      <depends>M-ACTSTATUS</depends>
+      <verification-ref>V-M-SUMMARY</verification-ref>
+      <annotations>
+        <fn-summarize PURPOSE="Итоги по выборке" />
+        <fn-summarize_by_project PURPOSE="Сводка по проектам/юрлицам с % закрытия" />
+      </annotations>
+    </M-SUMMARY>
+
+    <M-DB NAME="Db" TYPE="DATA_LAYER" LAYER="DATA" STATUS="planned">
+      <purpose>Engine, сессии, схема</purpose>
+      <path>backend/app/db.py</path>
+      <depends>none</depends>
+      <verification-ref>V-M-DB</verification-ref>
+      <annotations><fn-get_session PURPOSE="FastAPI dependency" /></annotations>
+    </M-DB>
+
+    <M-MODELS NAME="Models" TYPE="DATA_LAYER" LAYER="DATA" STATUS="planned">
+      <purpose>ORM: LegalEntity, Project, Payment (dedup_key, binding_method), Act (флаги, без статуса)</purpose>
+      <path>backend/app/models.py</path>
+      <depends>M-DB</depends>
+      <verification-ref>V-M-MODELS</verification-ref>
+      <annotations>
+        <type-LegalEntity PURPOSE="Клиент/юрлицо (ИНН unique)" />
+        <type-Project PURPOSE="Проект (клиент + договор/услуга)" />
+        <type-Payment PURPOSE="Оплата (dedup_key unique — идемпотентный импорт)" />
+        <type-Act PURPOSE="Акт: is_sent/is_signed/даты/комментарий; статус НЕ хранится" />
+      </annotations>
+    </M-MODELS>
+
+    <M-API NAME="Api" TYPE="ENTRY_POINT" LAYER="API" STATUS="planned">
+      <purpose>HTTP: импорт выписки, оплаты с фильтрами, акты, привязка, сводка, экспорт</purpose>
+      <path>backend/app/routers/</path>
+      <depends>M-PARSER, M-CLASSIFY, M-EXTRACT, M-BINDING, M-ACTSTATUS, M-SUMMARY, M-MODELS, M-DB</depends>
+      <verification-ref>V-M-API</verification-ref>
+      <annotations>
+        <export-router PURPOSE="/api/import/statement, /api/payments, /api/summary, /api/projects, /api/export.csv" />
+      </annotations>
+    </M-API>
+
+    <M-UI NAME="Ui" TYPE="UI_COMPONENT" LAYER="UI" STATUS="planned">
+      <purpose>Дашборд: сводка, таблица оплат, фильтры, статусы, массовые действия, отчёт импорта</purpose>
+      <path>frontend/src/</path>
+      <depends>M-API</depends>
+      <verification-ref>V-M-UI</verification-ref>
+      <annotations>
+        <export-DashboardPage PURPOSE="Сводка + оплаты + фильтры" />
+        <export-ImportPage PURPOSE="Загрузка выписки + отчёт с причинами отсева" />
+      </annotations>
+    </M-UI>
+
+    <M-INFRA NAME="Infra" TYPE="INTEGRATION" LAYER="DATA" STATUS="planned">
+      <purpose>docker compose + nginx + PostgreSQL; деплой на сервер</purpose>
+      <path>docker-compose.yml</path>
+      <depends>M-API, M-UI</depends>
+      <verification-ref>V-M-INFRA</verification-ref>
+      <annotations><export-compose PURPOSE="Единый origin, volume, публичная ссылка" /></annotations>
+    </M-INFRA>
+
+    <CrossLink from="M-CLASSIFY" to="M-PARSER" relation="классифицирует RawOperation" />
+    <CrossLink from="M-BINDING" to="M-EXTRACT" relation="использует извлечённые реквизиты" />
+    <CrossLink from="M-SUMMARY" to="M-ACTSTATUS" relation="агрегирует по статусам" />
+    <CrossLink from="M-API" to="M-PARSER" relation="импорт выписки" />
+    <CrossLink from="M-API" to="M-CLASSIFY" relation="отсев посторонних операций" />
+    <CrossLink from="M-API" to="M-BINDING" relation="привязка к проекту" />
+    <CrossLink from="M-API" to="M-ACTSTATUS" relation="статус на чтении" />
+    <CrossLink from="M-API" to="M-SUMMARY" relation="сводка" />
+    <CrossLink from="M-API" to="M-MODELS" relation="хранение" />
+    <CrossLink from="M-MODELS" to="M-DB" relation="declarative Base" />
+    <CrossLink from="M-UI" to="M-API" relation="HTTP /api" />
+    <CrossLink from="M-INFRA" to="M-API" relation="контейнер backend" />
+    <CrossLink from="M-INFRA" to="M-UI" relation="статика SPA" />
+  </Project>
+</KnowledgeGraph>

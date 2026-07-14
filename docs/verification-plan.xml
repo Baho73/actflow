@@ -1,0 +1,201 @@
+<VerificationPlan VERSION="1.0.0">
+  <GlobalPolicy>
+    <log-format>[Module][function][BLOCK_NAME] message</log-format>
+    <deterministic-first>true</deterministic-first>
+    <domain-level-focus>Домен тестируется БЕЗ БД и HTTP — это главный предмет оценки заказчика.</domain-level-focus>
+    <api-level-focus>API через TestClient на SQLite in-memory.</api-level-focus>
+    <e2e-level-focus>docker compose: импорт реальной выписки, персистентность статусов актов.</e2e-level-focus>
+    <redaction>Не логировать полные банковские реквизиты контрагентов.</redaction>
+  </GlobalPolicy>
+
+  <CriticalFlows>
+    <VF-001 NAME="LayerPurity" USE_CASES="все" PRIORITY="high">
+      <scenario>Домен не зависит от фреймворка и БД (прямой критерий ТЗ: «отделять данные, бизнес-логику и отображение»).</scenario>
+      <expected-outcome>Ни один модуль в app/domain/ не импортирует sqlalchemy, fastapi, psycopg. Проверяется автотестом на исходниках.</expected-outcome>
+      <required-signals><log-marker>нет (структурный тест)</log-marker></required-signals>
+    </VF-001>
+    <VF-002 NAME="StatementClassification" USE_CASES="UC-001" DATA_FLOW="DF-IMPORT" PRIORITY="high">
+      <scenario>Импорт эталонной выписки bank_statement.pdf.</scenario>
+      <expected-outcome>Оплаты клиентов распознаны; налоги (НДФЛ, ЕНС), комиссии банка (РКО, валютный контроль), переводы ИП себе, возврат депозита — отсеяны, каждая с причиной. Ни одна посторонняя операция не попала в суммы дашборда.</expected-outcome>
+      <required-signals>
+        <log-marker>[Api][import_statement][BLOCK_IMPORT_STATEMENT]</log-marker>
+      </required-signals>
+    </VF-002>
+    <VF-003 NAME="ProjectBindingVisible" USE_CASES="UC-003" DATA_FLOW="DF-BINDING" PRIORITY="high">
+      <scenario>Привязка оплаты к проекту при неполных данных.</scenario>
+      <expected-outcome>Способ привязки виден всегда (by_contract / by_client_service / manual / unbound). При нескольких кандидатах система НЕ угадывает — оплата уходит в «требует привязки».</expected-outcome>
+      <required-signals><log-marker>[Binding][bind_payment][BLOCK_BIND_RULES]</log-marker></required-signals>
+    </VF-003>
+    <VF-004 NAME="ActStatusMatrix" USE_CASES="UC-005" DATA_FLOW="DF-ACTS" PRIORITY="high">
+      <scenario>Все комбинации флагов акта и возраста оплаты.</scenario>
+      <expected-outcome>not_sent / awaiting_signature / closed / needs_attention по правилам; closed окончателен (просрочка его не меняет); «подписан без отправки» → ValueError.</expected-outcome>
+      <required-signals><log-marker>нет (чистая функция)</log-marker></required-signals>
+    </VF-004>
+    <VF-005 NAME="SummaryCompleteness" USE_CASES="UC-006, UC-008" DATA_FLOW="DF-SUMMARY" PRIORITY="high">
+      <scenario>Сводка под любым фильтром.</scenario>
+      <expected-outcome>Инвариант: closed_amount + open_amount == total_amount; сводка считается по отфильтрованной выборке, а не по всей базе.</expected-outcome>
+      <required-signals><log-marker>нет</log-marker></required-signals>
+    </VF-005>
+    <VF-006 NAME="IdempotentImport" USE_CASES="UC-001" DATA_FLOW="DF-IMPORT" PRIORITY="high">
+      <scenario>Повторная загрузка той же выписки.</scenario>
+      <expected-outcome>Дублей нет (dedup_key), отчёт показывает «уже загружено: N».</expected-outcome>
+      <required-signals><log-marker>[Api][import_statement][BLOCK_IMPORT_STATEMENT]</log-marker></required-signals>
+    </VF-006>
+  </CriticalFlows>
+
+  <ModuleVerification>
+    <V-M-PARSER MODULE="M-PARSER" PRIORITY="high">
+      <test-files><file>backend/tests/test_domain_parser.py</file></test-files>
+      <module-checks><check-1>cd backend &amp;&amp; python -m pytest tests/test_domain_parser.py -q</check-1></module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Эталонный PDF: извлечено ожидаемое число операций; многострочные назначения склеены; колонтитулы («1 / 5») вычищены из текста назначения.</scenario-1>
+        <scenario-2 kind="success">Извлечены дата, сумма, направление (дебет/кредит), № документа, ИНН и название контрагента.</scenario-2>
+        <scenario-3 kind="failure">Не-PDF или PDF без текстового слоя → StatementFormatError.</scenario-3>
+      </scenarios>
+    </V-M-PARSER>
+
+    <V-M-CLASSIFY MODULE="M-CLASSIFY" PRIORITY="high">
+      <test-files><file>backend/tests/test_domain_classify.py</file></test-files>
+      <module-checks><check-1>cd backend &amp;&amp; python -m pytest tests/test_domain_classify.py -q</check-1></module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Каждый тип из реальной выписки классифицируется верно: «Оплата по счету № 746 … за настройку Директа» → client_payment; «НДФЛ по расчету» → tax; «Пополнение ЕНС» → tax; «Комиссия за перечисления по зарплатному договору» → bank_fee; «Комиссия … агента валютного контроля» → bank_fee; «Перевод средств предпринимателя на личный счет» → own_transfer; «Возврат депозита по договору» → refund.</scenario-1>
+        <scenario-2 kind="success">Дебетовая операция никогда не client_payment.</scenario-2>
+        <scenario-3 kind="success">У каждой отсеянной операции есть человекочитаемая причина.</scenario-3>
+      </scenarios>
+    </V-M-CLASSIFY>
+
+    <V-M-EXTRACT MODULE="M-EXTRACT" PRIORITY="high">
+      <test-files><file>backend/tests/test_domain_extract.py</file></test-files>
+      <module-checks><check-1>cd backend &amp;&amp; python -m pytest tests/test_domain_extract.py -q</check-1></module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Один счёт: «по счету № 746 от 10.07.2026» → ['746'].</scenario-1>
+        <scenario-2 kind="success">Несколько счетов: «по счетам № 738, 791 и 792» → ['738','791','792'] (реальный краевой случай выписки).</scenario-2>
+        <scenario-3 kind="success">Договор в разных формах: «договор № 61», «договор услуг № 318», «по договору № 214» → номер извлечён.</scenario-3>
+        <scenario-4 kind="success">Тип услуги из словаря: Директ→контекстная реклама; SERM; SEO; «этап дизайна»→дизайн; «разработку лендинга»→лендинг; «личного кабинета»→личный кабинет; «копирайтинг»; «сопровождение сайта».</scenario-4>
+        <scenario-5 kind="success">Нет реквизитов («Оплата за услуги по SEO-продвижению сайта») → счета [], договор None, услуга SEO. Отсутствие — валидный результат, не ошибка.</scenario-5>
+      </scenarios>
+    </V-M-EXTRACT>
+
+    <V-M-BINDING MODULE="M-BINDING" PRIORITY="high">
+      <test-files><file>backend/tests/test_domain_binding.py</file></test-files>
+      <module-checks><check-1>cd backend &amp;&amp; python -m pytest tests/test_domain_binding.py -q</check-1></module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Совпал договор → by_contract.</scenario-1>
+        <scenario-2 kind="success">Договора нет, но клиент+услуга дают ЕДИНСТВЕННОГО кандидата → by_client_service.</scenario-2>
+        <scenario-3 kind="success">Несколько кандидатов → unbound (не угадываем).</scenario-3>
+        <scenario-4 kind="success">Нет данных → unbound, «требует привязки».</scenario-4>
+        <scenario-5 kind="success">Ручная привязка менеджером → manual, переживает переимпорт.</scenario-5>
+      </scenarios>
+    </V-M-BINDING>
+
+    <V-M-ACTSTATUS MODULE="M-ACTSTATUS" PRIORITY="high">
+      <test-files><file>backend/tests/test_domain_act_status.py</file></test-files>
+      <module-checks><check-1>cd backend &amp;&amp; python -m pytest tests/test_domain_act_status.py -q</check-1></module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Матрица: (не отпр., не подп., свежая)→not_sent; (отпр., не подп., свежая)→awaiting_signature; (отпр., подп.)→closed; (не отпр., старая)→needs_attention; (отпр., не подп., старая)→needs_attention.</scenario-1>
+        <scenario-2 kind="success">closed окончателен: старая оплата с подписанным актом остаётся closed.</scenario-2>
+        <scenario-3 kind="failure">is_signed=True при is_sent=False → ValueError (недопустимое состояние).</scenario-3>
+        <scenario-4 kind="success">Порог SLA настраивается; граница ровно sla_days ещё не «требует внимания».</scenario-4>
+      </scenarios>
+    </V-M-ACTSTATUS>
+
+    <V-M-SUMMARY MODULE="M-SUMMARY" PRIORITY="high">
+      <test-files><file>backend/tests/test_domain_summary.py</file></test-files>
+      <module-checks><check-1>cd backend &amp;&amp; python -m pytest tests/test_domain_summary.py -q</check-1></module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Инвариант: closed_amount + open_amount == total_amount.</scenario-1>
+        <scenario-2 kind="success">Счётчики по статусам в сумме равны числу оплат.</scenario-2>
+        <scenario-3 kind="success">Сводка по проектам: % закрытия = закрытая сумма / сумма оплат.</scenario-3>
+      </scenarios>
+    </V-M-SUMMARY>
+
+    <V-M-DB MODULE="M-DB" PRIORITY="medium">
+      <test-files><file>backend/tests/conftest.py</file></test-files>
+      <module-checks><check-1>фикстура client поднимается (неявно проверяется всеми API-тестами)</check-1></module-checks>
+      <scenarios><scenario-1 kind="success">create_all создаёт схему; сессия работает.</scenario-1></scenarios>
+    </V-M-DB>
+
+    <V-M-MODELS MODULE="M-MODELS" PRIORITY="medium">
+      <test-files><file>backend/tests/test_api.py</file></test-files>
+      <module-checks><check-1>cd backend &amp;&amp; python -m pytest tests/test_api.py -q</check-1></module-checks>
+      <scenarios>
+        <scenario-1 kind="success">dedup_key unique: повторный импорт не двоит оплаты.</scenario-1>
+        <scenario-2 kind="success">Act 1:1 к Payment; статус в БД НЕ хранится.</scenario-2>
+      </scenarios>
+    </V-M-MODELS>
+
+    <V-M-API MODULE="M-API" PRIORITY="high">
+      <test-files><file>backend/tests/test_api.py</file></test-files>
+      <module-checks><check-1>cd backend &amp;&amp; python -m pytest -q</check-1></module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Импорт эталонного PDF через HTTP: отчёт «принято N / отсеяно M с причинами».</scenario-1>
+        <scenario-2 kind="success">Повторный импорт: дублей нет.</scenario-2>
+        <scenario-3 kind="success">Фильтры (проект, юрлицо, период, статус, услуга, поиск) комбинируются; сводка считается под фильтром.</scenario-3>
+        <scenario-4 kind="success">Отметки актов сохраняются; массовое действие применяется ко всем оплатам под фильтром.</scenario-4>
+        <scenario-5 kind="success">Ручная привязка проекта меняет binding_method на manual.</scenario-5>
+        <scenario-6 kind="success">Экспорт CSV отдаёт ровно отфильтрованное; UTF-8 с BOM.</scenario-6>
+        <scenario-7 kind="failure">Не-PDF → 400 с понятным текстом.</scenario-7>
+      </scenarios>
+      <required-log-markers><marker-1>[Api][import_statement][BLOCK_IMPORT_STATEMENT]</marker-1></required-log-markers>
+    </V-M-API>
+
+    <V-M-UI MODULE="M-UI" PRIORITY="medium">
+      <test-files><file>ручной смоук по UC-001..UC-009</file></test-files>
+      <module-checks><check-1>cd frontend &amp;&amp; npm run build</check-1></module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Все UC проходимы мышью; отчёт импорта показывает отсеянные операции с причинами.</scenario-1>
+        <scenario-2 kind="success">Фронт ничего не вычисляет: статусы и суммы приходят с сервера.</scenario-2>
+      </scenarios>
+    </V-M-UI>
+
+    <V-M-INFRA MODULE="M-INFRA" PRIORITY="high">
+      <test-files><file>e2e-смоук</file></test-files>
+      <module-checks>
+        <check-1>docker compose up -d --build; дашборд открывается; /api/health == ok</check-1>
+        <check-2>docker compose down + up; статусы актов на месте</check-2>
+      </module-checks>
+      <scenarios>
+        <scenario-1 kind="success">Чистая машина: одна команда поднимает всё.</scenario-1>
+        <scenario-2 kind="success">Публичная ссылка доступна заказчику.</scenario-2>
+      </scenarios>
+    </V-M-INFRA>
+  </ModuleVerification>
+
+  <PhaseGates>
+    <Gate-Phase-1 PHASE="Phase-1">
+      <goal>Домен доказуемо корректен без БД и HTTP.</goal>
+      <commands><command-1>cd backend &amp;&amp; python -m pytest tests/test_domain_*.py -q</command-1></commands>
+      <required-evidence>
+        <evidence-1>Тест чистоты слоя: домен не импортирует sqlalchemy/fastapi.</evidence-1>
+        <evidence-2>Эталонная выписка: посторонние операции отсеяны с причинами.</evidence-2>
+      </required-evidence>
+    </Gate-Phase-1>
+    <Gate-Phase-2 PHASE="Phase-2">
+      <goal>API зелёный, импорт идемпотентен.</goal>
+      <commands><command-1>cd backend &amp;&amp; python -m pytest -q</command-1></commands>
+      <required-evidence><evidence-1>Повторный импорт не создаёт дублей.</evidence-1></required-evidence>
+    </Gate-Phase-2>
+    <Gate-Phase-3 PHASE="Phase-3">
+      <goal>Дашборд собирается и покрывает процесс менеджера.</goal>
+      <commands><command-1>cd frontend &amp;&amp; npm run build</command-1></commands>
+      <required-evidence><evidence-1>Смоук: импорт → привязка → отметки → сводка сходится.</evidence-1></required-evidence>
+    </Gate-Phase-3>
+    <Gate-Phase-4 PHASE="Phase-4">
+      <goal>Сдаваемо: одна команда, публичная ссылка, документы.</goal>
+      <commands>
+        <command-1>docker compose up -d --build</command-1>
+        <command-2>cd backend &amp;&amp; python -m pytest -q</command-2>
+      </commands>
+      <required-evidence>
+        <evidence-1>Статусы актов переживают перезапуск.</evidence-1>
+        <evidence-2>README отвечает на «Ожидаемый результат» ТЗ: сущности, связи, где логика, допущения.</evidence-2>
+      </required-evidence>
+    </Gate-Phase-4>
+  </PhaseGates>
+
+  <FailurePackets>
+    <packet-template>
+      <expected-fields>scenario, expected-evidence, observed-evidence, first-divergent-block, next-action</expected-fields>
+    </packet-template>
+  </FailurePackets>
+</VerificationPlan>

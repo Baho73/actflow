@@ -1,0 +1,384 @@
+<DevelopmentPlan VERSION="1.0.0">
+  <ArchitectureNotes>
+    <objective>Показать бизнес-процесс, а не верстку: чистый слой домена (парсер → классификация → привязка → статусы → агрегаты), который тестируется без БД и HTTP и переносится на любой стек.</objective>
+    <key-insight>Проект — не поле платежа. Он ВЫВОДИТСЯ. Поэтому центральная сущность архитектуры — не таблица, а ПРАВИЛО ПРИВЯЗКИ, и оно должно быть видимым: у каждой оплаты хранится, каким способом она привязана (по договору / по услуге / вручную / не привязана).</key-insight>
+    <non-goal>Бухгалтерия, интеграции, авторизация, генерация актов.</non-goal>
+    <risk-1>Классификация операций: попадание налога или комиссии банка в «оплаты клиентов» исказит все суммы дашборда. Закрыт тестом на эталонной выписке.</risk-1>
+    <risk-2>Молчаливое угадывание проекта или этапа. Закрыто явными статусами «требует привязки» / «этап не определён» и видимым способом привязки.</risk-2>
+  </ArchitectureNotes>
+
+  <Modules>
+    <M-PARSER NAME="StatementParser" TYPE="CORE_LOGIC" LAYER="DOMAIN" ORDER="1" STATUS="planned">
+      <contract>
+        <purpose>Извлечь из PDF-выписки список сырых операций (без интерпретации бизнес-смысла).</purpose>
+        <inputs>
+          <param name="content" type="bytes (PDF с текстовым слоем)" />
+        </inputs>
+        <outputs>
+          <param name="operations" type="list[RawOperation(date, amount, direction: debit|credit, doc_number, counterparty_name, counterparty_inn, purpose_text, raw_line_no)]" />
+        </outputs>
+        <errors>
+          <error code="StatementFormatError: PDF не читается / нет текстового слоя / не похоже на выписку" />
+        </errors>
+      </contract>
+      <interface>
+        <export-parse_statement PURPOSE="bytes → list[RawOperation]; склейка многострочных назначений; чистка колонтитулов («1 / 5»)" />
+        <export-RawOperation PURPOSE="Сырая операция выписки" />
+        <export-StatementFormatError PURPOSE="Ошибка уровня файла" />
+      </interface>
+      <depends>none</depends>
+      <target>
+        <source>backend/app/domain/parser.py</source>
+        <tests>backend/tests/test_domain_parser.py</tests>
+      </target>
+      <observability>
+        <log-prefix>[Parser]</log-prefix>
+        <critical-block>BLOCK_EXTRACT_OPERATIONS</critical-block>
+      </observability>
+      <verification-ref>V-M-PARSER</verification-ref>
+      <notes>
+        <note-1>Парсер за портом: он НЕ знает про проекты и акты. Замена pdfplumber на document-AI (сканы, другие банки) не затрагивает остальной домен.</note-1>
+      </notes>
+    </M-PARSER>
+
+    <M-CLASSIFY NAME="OperationClassifier" TYPE="CORE_LOGIC" LAYER="DOMAIN" ORDER="2" STATUS="planned">
+      <contract>
+        <purpose>Определить, что за операция: оплата клиента или посторонняя (в дашборд идут только оплаты клиентов).</purpose>
+        <inputs>
+          <param name="operation" type="RawOperation" />
+        </inputs>
+        <outputs>
+          <param name="kind" type="client_payment | tax | bank_fee | own_transfer | refund | other — плюс reason (человекочитаемая причина отсева)" />
+        </outputs>
+        <errors>
+          <error code="none (классификация всегда даёт результат; сомнительное → other с причиной)" />
+        </errors>
+      </contract>
+      <interface>
+        <export-classify_operation PURPOSE="RawOperation → OperationKind + reason" />
+      </interface>
+      <depends>M-PARSER</depends>
+      <target>
+        <source>backend/app/domain/classify.py</source>
+        <tests>backend/tests/test_domain_classify.py</tests>
+      </target>
+      <observability>
+        <log-prefix>[Classify]</log-prefix>
+      </observability>
+      <verification-ref>V-M-CLASSIFY</verification-ref>
+      <notes>
+        <note-1>Правила (порядок важен, первое совпадение побеждает): direction=debit → не оплата (расход); НДФЛ/ЕНС/налог/взнос → tax; комиссия банка/РКО/валютный контроль → bank_fee; «перевод средств предпринимателя на личный счет» → own_transfer; «возврат депозита» → refund; иначе credit с назначением, содержащим «оплата/аванс» → client_payment; остальное → other. Каждая отсеянная операция показывается пользователю с причиной — молчаливого выбрасывания нет.</note-1>
+      </notes>
+    </M-CLASSIFY>
+
+    <M-EXTRACT NAME="PaymentExtractor" TYPE="CORE_LOGIC" LAYER="DOMAIN" ORDER="3" STATUS="planned">
+      <contract>
+        <purpose>Из назначения платежа вытащить бизнес-реквизиты: номера счетов, номер договора, тип услуги (этап).</purpose>
+        <inputs>
+          <param name="purpose_text" type="str (назначение платежа)" />
+        </inputs>
+        <outputs>
+          <param name="invoice_numbers" type="list[str] — может быть несколько («по счетам № 738, 791 и 792») или пусто" />
+          <param name="contract_number" type="str | None (форматы: «договор № 61», «договор услуг № 318», «981200-АНОН»)" />
+          <param name="service_stage" type="str | None — из словаря услуг (SEO, контекстная реклама, SERM, дизайн, разработка сайта, лендинг, личный кабинет, сопровождение, копирайтинг, SMM, презентация, лицензия, наполнение); None → «этап не определён»" />
+        </outputs>
+        <errors>
+          <error code="none (отсутствие реквизита — валидный результат None/[], а не ошибка)" />
+        </errors>
+      </contract>
+      <interface>
+        <export-extract_payment_details PURPOSE="Назначение → (счета, договор, услуга)" />
+        <export-SERVICE_DICTIONARY PURPOSE="Словарь типов услуг с ключевыми словами" />
+      </interface>
+      <depends>none</depends>
+      <target>
+        <source>backend/app/domain/extract.py</source>
+        <tests>backend/tests/test_domain_extract.py</tests>
+      </target>
+      <observability>
+        <log-prefix>[Extract]</log-prefix>
+      </observability>
+      <verification-ref>V-M-EXTRACT</verification-ref>
+    </M-EXTRACT>
+
+    <M-BINDING NAME="ProjectBinding" TYPE="CORE_LOGIC" LAYER="DOMAIN" ORDER="4" STATUS="planned">
+      <contract>
+        <purpose>Связать оплату с проектом. Проекта в выписке нет — он выводится по видимому правилу.</purpose>
+        <inputs>
+          <param name="payment_details" type="(counterparty_inn, contract_number, service_stage)" />
+          <param name="known_projects" type="list[Project(id, client_inn, contract_number, service_stage)] — справочник, накапливается менеджером" />
+        </inputs>
+        <outputs>
+          <param name="binding" type="(project_id | None, method: by_contract | by_client_service | manual | unbound)" />
+        </outputs>
+        <errors>
+          <error code="none (неоднозначность — валидный исход: unbound, ждёт менеджера)" />
+        </errors>
+      </contract>
+      <interface>
+        <export-bind_payment PURPOSE="Правила привязки, первое сработавшее побеждает" />
+        <export-BindingMethod PURPOSE="Способ привязки — ХРАНИТСЯ у оплаты и виден в UI" />
+      </interface>
+      <depends>M-EXTRACT</depends>
+      <target>
+        <source>backend/app/domain/binding.py</source>
+        <tests>backend/tests/test_domain_binding.py</tests>
+      </target>
+      <observability>
+        <log-prefix>[Binding]</log-prefix>
+        <critical-block>BLOCK_BIND_RULES</critical-block>
+      </observability>
+      <verification-ref>V-M-BINDING</verification-ref>
+      <notes>
+        <note-1>Правила по приоритету: (1) by_contract — совпал номер договора у известного проекта; (2) by_client_service — совпали ИНН клиента И тип услуги (единственный кандидат); если кандидатов несколько — НЕ угадываем, уходим в unbound; (3) manual — менеджер привязал руками; (4) unbound — «требует привязки». Способ привязки хранится и показывается: пользователь всегда видит, почему оплата оказалась в этом проекте.</note-1>
+      </notes>
+    </M-BINDING>
+
+    <M-ACTSTATUS NAME="ActStatus" TYPE="CORE_LOGIC" LAYER="DOMAIN" ORDER="5" STATUS="planned">
+      <contract>
+        <purpose>Вычислить статус закрывающего документа по оплате. Статус — производная величина, НЕ хранится.</purpose>
+        <inputs>
+          <param name="is_sent" type="bool" />
+          <param name="is_signed" type="bool" />
+          <param name="payment_date" type="date" />
+          <param name="today" type="date (инъекция, чтобы тесты были детерминированы)" />
+          <param name="sla_days" type="int = 14 (настройка)" />
+        </inputs>
+        <outputs>
+          <param name="status" type="not_sent | awaiting_signature | closed | needs_attention" />
+        </outputs>
+        <errors>
+          <error code="ValueError: подписан, но не отправлен — недопустимое состояние (защита инварианта)" />
+        </errors>
+      </contract>
+      <interface>
+        <export-compute_act_status PURPOSE="Матрица статусов + SLA" />
+        <export-ActStatus PURPOSE="Перечисление статусов" />
+      </interface>
+      <depends>none</depends>
+      <target>
+        <source>backend/app/domain/act_status.py</source>
+        <tests>backend/tests/test_domain_act_status.py</tests>
+      </target>
+      <observability>
+        <log-prefix>[ActStatus]</log-prefix>
+      </observability>
+      <verification-ref>V-M-ACTSTATUS</verification-ref>
+      <notes>
+        <note-1>Правила: подписан (и отправлен) → closed; отправлен, не подписан → awaiting_signature, НО если оплате больше sla_days → needs_attention; не отправлен → not_sent, НО если оплате больше sla_days → needs_attention. Приоритет needs_attention выше любого незакрытого. Закрытый акт «просрочкой» не становится: closed окончателен.</note-1>
+      </notes>
+    </M-ACTSTATUS>
+
+    <M-SUMMARY NAME="Summary" TYPE="CORE_LOGIC" LAYER="DOMAIN" ORDER="6" STATUS="planned">
+      <contract>
+        <purpose>Свести показатели дашборда по текущей выборке оплат.</purpose>
+        <inputs>
+          <param name="payments" type="iterable[(amount: Decimal, status: ActStatus, project_id, client_inn)]" />
+        </inputs>
+        <outputs>
+          <param name="totals" type="{total_amount, payments_count, projects_count, closed_amount, open_amount, not_sent_count, awaiting_count, needs_attention_count}" />
+          <param name="by_project" type="[{project, payments_count, total, sent_count, signed_count, closed_ratio}]" />
+        </outputs>
+        <errors>
+          <error code="none" />
+        </errors>
+      </contract>
+      <interface>
+        <export-summarize PURPOSE="Итоги; инвариант: closed_amount + open_amount == total_amount" />
+        <export-summarize_by_project PURPOSE="Сводка по проектам/юрлицам" />
+      </interface>
+      <depends>M-ACTSTATUS</depends>
+      <target>
+        <source>backend/app/domain/summary.py</source>
+        <tests>backend/tests/test_domain_summary.py</tests>
+      </target>
+      <observability>
+        <log-prefix>[Summary]</log-prefix>
+      </observability>
+      <verification-ref>V-M-SUMMARY</verification-ref>
+    </M-SUMMARY>
+
+    <M-DB NAME="Db" TYPE="DATA_LAYER" LAYER="DATA" ORDER="7" STATUS="planned">
+      <contract>
+        <purpose>Подключение к БД, сессии, создание схемы.</purpose>
+        <inputs><param name="DATABASE_URL" type="env; в тестах sqlite in-memory" /></inputs>
+        <outputs><param name="engine, SessionLocal, Base, get_session" type="SQLAlchemy 2.0" /></outputs>
+        <errors><error code="OperationalError (ретраи при старте контейнера)" /></errors>
+      </contract>
+      <interface><export-get_session PURPOSE="FastAPI dependency" /></interface>
+      <depends>none</depends>
+      <target>
+        <source>backend/app/db.py</source>
+        <tests>backend/tests/conftest.py</tests>
+      </target>
+      <observability><log-prefix>[Db]</log-prefix></observability>
+      <verification-ref>V-M-DB</verification-ref>
+    </M-DB>
+
+    <M-MODELS NAME="Models" TYPE="DATA_LAYER" LAYER="DATA" ORDER="8" STATUS="planned">
+      <contract>
+        <purpose>ORM-модели: LegalEntity (клиент), Project, Payment, Act. Только хранение, без бизнес-логики.</purpose>
+        <inputs><param name="-" type="-" /></inputs>
+        <outputs>
+          <param name="LegalEntity" type="id, name, inn (unique), ogrn?, bank_account?" />
+          <param name="Project" type="id, name, client_id, contract_number?, service_stage?, status" />
+          <param name="Payment" type="id, client_id, project_id?, binding_method, payment_date, amount NUMERIC(14,2), purpose_text, invoice_numbers (JSON), contract_number?, service_stage?, doc_number, dedup_key (unique) — идемпотентность повторной загрузки" />
+          <param name="Act" type="id, payment_id (1:1), is_sent, sent_at?, is_signed, signed_at?, manager_comment — СТАТУС НЕ ХРАНИТСЯ (вычисляется доменом)" />
+        </outputs>
+        <errors><error code="IntegrityError на дубликат dedup_key — повторная загрузка выписки не двоит оплаты" /></errors>
+      </contract>
+      <interface>
+        <type-LegalEntity PURPOSE="Юрлицо/клиент" />
+        <type-Project PURPOSE="Проект" />
+        <type-Payment PURPOSE="Оплата" />
+        <type-Act PURPOSE="Закрывающий документ" />
+      </interface>
+      <depends>M-DB</depends>
+      <target>
+        <source>backend/app/models.py</source>
+        <tests>backend/tests/test_api.py</tests>
+      </target>
+      <observability><log-prefix>[Models]</log-prefix></observability>
+      <verification-ref>V-M-MODELS</verification-ref>
+    </M-MODELS>
+
+    <M-API NAME="Api" TYPE="ENTRY_POINT" LAYER="API" ORDER="9" STATUS="planned">
+      <contract>
+        <purpose>HTTP: загрузка выписки, список оплат с фильтрами, отметки актов, привязка проекта, сводка, экспорт CSV.</purpose>
+        <inputs>
+          <param name="HTTP" type="POST /api/import/statement (PDF); GET /api/payments (фильтры+пагинация); PATCH /api/payments/{id}/act; POST /api/payments/bulk-act; PATCH /api/payments/{id}/project; GET /api/summary; GET /api/projects; GET /api/export.csv" />
+        </inputs>
+        <outputs>
+          <param name="JSON" type="Отчёт импорта (принято/отсеяно с причинами), страницы оплат, сводка, справочники" />
+        </outputs>
+        <errors><error code="400 нечитаемый PDF; 404; 422 валидация" /></errors>
+      </contract>
+      <interface><export-router PURPOSE="APIRouter /api" /></interface>
+      <depends>M-PARSER, M-CLASSIFY, M-EXTRACT, M-BINDING, M-ACTSTATUS, M-SUMMARY, M-MODELS, M-DB</depends>
+      <target>
+        <source>backend/app/routers/</source>
+        <tests>backend/tests/test_api.py</tests>
+      </target>
+      <observability>
+        <log-prefix>[Api]</log-prefix>
+        <critical-block>BLOCK_IMPORT_STATEMENT</critical-block>
+      </observability>
+      <verification-ref>V-M-API</verification-ref>
+      <notes>
+        <note-1>API не содержит бизнес-правил: статус акта, привязку и агрегаты считает домен. Роутер только достаёт данные и зовёт домен.</note-1>
+      </notes>
+    </M-API>
+
+    <M-UI NAME="Ui" TYPE="UI_COMPONENT" LAYER="UI" ORDER="10" STATUS="planned">
+      <contract>
+        <purpose>Дашборд: сводка, таблица оплат с фильтрами и статусами, отметки актов, массовые действия, сводка по проектам, отчёт импорта.</purpose>
+        <inputs><param name="API" type="/api" /></inputs>
+        <outputs><param name="SPA" type="React + TypeScript; ничего не вычисляет — только показывает" /></outputs>
+        <errors><error code="Ошибки API — человекочитаемым баннером" /></errors>
+      </contract>
+      <interface>
+        <export-DashboardPage PURPOSE="Сводка + таблица оплат + фильтры" />
+        <export-ImportPage PURPOSE="Загрузка выписки + отчёт (принято / отсеяно с причинами)" />
+      </interface>
+      <depends>M-API</depends>
+      <target>
+        <source>frontend/src/</source>
+        <tests>ручной смоук + e2e</tests>
+      </target>
+      <observability><log-prefix>[Ui]</log-prefix></observability>
+      <verification-ref>V-M-UI</verification-ref>
+    </M-UI>
+
+    <M-INFRA NAME="Infra" TYPE="INTEGRATION" LAYER="DATA" ORDER="11" STATUS="planned">
+      <contract>
+        <purpose>docker compose + nginx единый origin + PostgreSQL volume; деплой на сервер.</purpose>
+        <inputs><param name="docker compose up" type="чистая машина" /></inputs>
+        <outputs><param name="публичная ссылка" type="дашборд доступен заказчику" /></outputs>
+        <errors><error code="healthcheck postgres, ретраи подключения" /></errors>
+      </contract>
+      <interface><export-compose PURPOSE="docker-compose.yml, nginx.conf, Dockerfile x2" /></interface>
+      <depends>M-API, M-UI</depends>
+      <target>
+        <source>docker-compose.yml</source>
+        <tests>e2e-смоук</tests>
+      </target>
+      <observability><log-prefix>[Infra]</log-prefix></observability>
+      <verification-ref>V-M-INFRA</verification-ref>
+    </M-INFRA>
+  </Modules>
+
+  <DataFlow>
+    <DF-IMPORT NAME="Импорт выписки" TRIGGER="Менеджер загружает PDF">
+      <step-1>API принимает PDF → M-PARSER извлекает сырые операции</step-1>
+      <step-2>M-CLASSIFY делит: оплаты клиентов vs посторонние (налоги, комиссии, переводы себе) — с причиной по каждой отсеянной</step-2>
+      <step-3>M-EXTRACT достаёт счета, договор, тип услуги из назначения</step-3>
+      <step-4>M-BINDING привязывает к проекту по видимому правилу; неоднозначное → «требует привязки»</step-4>
+      <step-5>Сохранение с dedup_key (повторная загрузка не двоит); отчёт: принято N, отсеяно M с причинами</step-5>
+      <evidence>[Api][import_statement][BLOCK_IMPORT_STATEMENT]; test_import_reference_statement</evidence>
+    </DF-IMPORT>
+    <DF-ACTS NAME="Документооборот" TRIGGER="Менеджер отмечает акт">
+      <step-1>PATCH /api/payments/{id}/act → флаги is_sent/is_signed + даты; комментарий</step-1>
+      <step-2>Статус НЕ сохраняется: при чтении M-ACTSTATUS вычисляет его из флагов и возраста оплаты</step-2>
+      <step-3>Массовое действие применяет отметку ко всем оплатам под текущим фильтром</step-3>
+      <evidence>test_act_flags_persist, test_act_status_matrix, test_bulk_mark</evidence>
+    </DF-ACTS>
+    <DF-SUMMARY NAME="Сводка" TRIGGER="Открытие дашборда / смена фильтра">
+      <step-1>API собирает оплаты под фильтром → домен считает статусы → M-SUMMARY агрегирует</step-1>
+      <step-2>Инвариант: closed_amount + open_amount == total_amount при любом фильтре</step-2>
+      <evidence>test_summary_totals_converge, test_summary_respects_filters</evidence>
+    </DF-SUMMARY>
+  </DataFlow>
+
+  <ImplementationOrder>
+    <Phase-1 name="Domain" status="pending">
+      <goal>Бизнес-логика доказуемо корректна БЕЗ БД и HTTP — то, что заказчик оценивает в первую очередь.</goal>
+      <step-1 module="M-PARSER" status="pending" verification="V-M-PARSER">Парсер выписки + тесты на эталонном PDF</step-1>
+      <step-2 module="M-CLASSIFY" status="pending" verification="V-M-CLASSIFY">Классификация операций + тесты на всех типах из выписки</step-2>
+      <step-3 module="M-EXTRACT" status="pending" verification="V-M-EXTRACT">Извлечение реквизитов + тесты на краевых случаях</step-3>
+      <step-4 module="M-BINDING" status="pending" verification="V-M-BINDING">Правила привязки + тесты (включая «не угадываем при неоднозначности»)</step-4>
+      <step-5 module="M-ACTSTATUS" status="pending" verification="V-M-ACTSTATUS">Матрица статусов + SLA</step-5>
+      <step-6 module="M-SUMMARY" status="pending" verification="V-M-SUMMARY">Агрегаты + инвариант полноты</step-6>
+      <checkpoint>
+        <condition-1>pytest tests/test_domain_*.py — зелёные; домен не импортирует sqlalchemy/fastapi (проверяется тестом)</condition-1>
+        <condition-2>На эталонной выписке: точное число оплат клиентов, все посторонние операции отсеяны с причинами</condition-2>
+        <on-fail>grace-fix; при изменении контракта — вернуться в план</on-fail>
+      </checkpoint>
+    </Phase-1>
+    <Phase-2 name="Persistence and API" status="pending">
+      <goal>Данные и транспорт поверх готового домена.</goal>
+      <step-1 module="M-DB" status="pending" verification="V-M-DB">db.py + conftest</step-1>
+      <step-2 module="M-MODELS" status="pending" verification="V-M-MODELS">ORM + dedup_key</step-2>
+      <step-3 module="M-API" status="pending" verification="V-M-API">Импорт, оплаты, фильтры, акты, привязка, сводка, экспорт</step-3>
+      <checkpoint>
+        <condition-1>pytest -q полностью зелёный; импорт эталонной выписки через HTTP даёт ожидаемый отчёт</condition-1>
+        <condition-2>Повторный импорт того же файла НЕ создаёт дублей</condition-2>
+        <on-fail>grace-fix</on-fail>
+      </checkpoint>
+    </Phase-2>
+    <Phase-3 name="Dashboard" status="pending">
+      <goal>Интерфейс под реальный процесс менеджера.</goal>
+      <step-1 module="M-UI" status="pending" verification="V-M-UI">Сводка, таблица, фильтры, отметки, массовые действия, отчёт импорта</step-1>
+      <checkpoint>
+        <condition-1>npm run build без ошибок типов</condition-1>
+        <condition-2>Смоук: загрузка выписки → привязка → отметки актов → сводка сходится</condition-2>
+        <on-fail>grace-fix</on-fail>
+      </checkpoint>
+    </Phase-3>
+    <Phase-4 name="Ship" status="pending">
+      <goal>Запуск одной командой, деплой с публичной ссылкой, документы сдачи.</goal>
+      <step-1 module="M-INFRA" status="pending" verification="V-M-INFRA">docker compose + nginx</step-1>
+      <step-2 module="M-INFRA" status="pending" verification="V-M-INFRA">Деплой на сервер, README (в т.ч. обоснование стека), DECISIONS (сущности, связи, где логика, допущения)</step-2>
+      <checkpoint>
+        <condition-1>docker compose up на чистых volume: дашборд открывается, выписка импортируется, статусы актов переживают перезапуск</condition-1>
+        <condition-2>Публичная ссылка работает; README и DECISIONS отвечают на все вопросы «Ожидаемого результата» из ТЗ</condition-2>
+        <on-fail>чеклист docker-deploy: подтвердить новый код в контейнере</on-fail>
+      </checkpoint>
+    </Phase-4>
+  </ImplementationOrder>
+
+  <ExecutionPolicy>
+    <default-profile>balanced</default-profile>
+    <controller-owns>docs/development-plan.xml, docs/knowledge-graph.xml, docs/verification-plan.xml</controller-owns>
+    <layer-rule>Домен не импортирует SQLAlchemy и FastAPI. Нарушение — дефект ревью.</layer-rule>
+  </ExecutionPolicy>
+</DevelopmentPlan>
