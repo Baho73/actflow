@@ -94,6 +94,27 @@ def test_reference_payments_are_credit():
     assert sigma[0].amount == Decimal("54400.00")
 
 
+def test_purpose_has_no_footer_leakage():
+    """РЕГРЕССИЯ (поймано визуальной проверкой дашборда): подвал выписки затекал
+    в назначение последней операции («Количество операций 21 26 47 Итого оборотов…»)."""
+    _, ops = parse_statement(STATEMENT)
+    for o in ops:
+        assert "Количество операций" not in o.purpose_text
+        assert "Итого оборот" not in o.purpose_text
+        assert "остаток" not in o.purpose_text.lower()
+
+
+def test_purpose_has_no_bank_name_prefix():
+    """РЕГРЕССИЯ: назначения начинались с названия банка («АО "НАВИГАТОР БАНК" Оплата по счету…»)."""
+    _, ops = parse_statement(STATEMENT)
+    payments = [o for o in ops if o.direction == "credit"]
+    for o in payments:
+        assert not o.purpose_text.startswith("АО"), o.purpose_text
+        assert not o.purpose_text.startswith("БИК"), o.purpose_text
+    # назначение начинается с действия
+    assert any(o.purpose_text.startswith("Оплата") for o in payments)
+
+
 def test_not_a_pdf():
     with pytest.raises(StatementFormatError):
         parse_statement(b"not a pdf at all")

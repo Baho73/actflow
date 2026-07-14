@@ -53,6 +53,18 @@ _TAX_TAIL = re.compile(
 _PAGE_MARK = re.compile(r"\s*\d+\s*/\s*\d+\s*$")
 _FOOTER = re.compile(r"Количество\s+операций\s+(\d+)\s+(\d+)\s+(\d+)")
 _ORG_HINT = re.compile(r"(ООО|АО|ЗАО|ПАО|ИП|УФК|ФНС|Казначейств)", re.IGNORECASE)
+# Маркеры подвала: он затекает в блок последней операции и мусорит её назначение.
+_FOOTER_MARK = re.compile(
+    r"Количество\s+операций|Итого\s+оборот|Входящий\s+остаток|Исходящий\s+остаток", re.IGNORECASE
+)
+# Назначение начинается с действия. Список закрытый — в выписке ограниченный набор формулировок.
+_PURPOSE_START = re.compile(
+    r"^\s*(Оплата|Предоплата|Авансовый|Аванс|НДФЛ|Пополнение|Перевод|Перечисление|Комиссия|Возврат|"
+    r"Взнос|Страховые|Аренда|Зарплата|Выплата|Размещение|Настройка|Услуги|Счет\s+на\s+оплату|"
+    r"Ежемесячн|Сопровождение|Публикация|Подготовка|Проектирование|Разработка|За\s+услуги)",
+    re.IGNORECASE,
+)
+_BANK_NAME_LINE = re.compile(r"БАНК|БИК|//|Банка\s+России|УФК|филиал", re.IGNORECASE)
 
 
 class StatementFormatError(Exception):
@@ -225,16 +237,22 @@ def _find_doc_number(lines: list[str]) -> str:
 
 
 def _find_purpose(lines: list[str]) -> str:
-    """Назначение — хвост блока после строки БИК (она разделяет реквизиты и текст платежа)."""
+    """Назначение платежа. Два капкана, оба пойманы визуальной проверкой дашборда:
+    (1) после строки БИК идёт продолжение НАЗВАНИЯ БАНКА — оно не назначение;
+    (2) в последнюю операцию затекает ПОДВАЛ выписки («Итого оборотов…»)."""
     idx = next((i for i, ln in enumerate(lines) if _BIK_LINE.match(ln)), None)
-    if idx is None:
-        return ""
-    tail = lines[idx + 1 :]
-    # первая строка после БИК — продолжение названия банка, назначение идёт следом;
-    # берём всё и отсекаем банковскую строку по признаку «//» или «Банка России»
-    text = " ".join(t.strip() for t in tail if t.strip())
-    text = re.sub(r"^[^.]*?(//|Банка\s+России)[^.]*?\s", "", text)
-    return text
+    tail = lines[idx + 1 :] if idx is not None else lines
+
+    # подвал выписки обрывает блок последней операции
+    cut = next((i for i, ln in enumerate(tail) if _FOOTER_MARK.search(ln)), len(tail))
+    tail = [t.strip() for t in tail[:cut] if t.strip()]
+
+    # назначение начинается со слова-действия; всё до него — реквизиты банка
+    start = next((i for i, ln in enumerate(tail) if _PURPOSE_START.match(ln)), None)
+    if start is not None:
+        return " ".join(tail[start:])
+    # запасной путь: отбросить строки, похожие на название банка
+    return " ".join(t for t in tail if not _BANK_NAME_LINE.search(t))
 
 
 # START_CONTRACT: clean_purpose

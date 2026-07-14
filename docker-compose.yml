@@ -1,0 +1,34 @@
+# Запуск: docker compose up -d --build  ->  http://localhost:8090
+# Порт переопределяется: ACTFLOW_PORT=8091 docker compose up -d
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: actflow
+      POSTGRES_PASSWORD: actflow
+      POSTGRES_DB: actflow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U actflow -d actflow"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://actflow:actflow@db:5432/actflow
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build: ./frontend
+    ports:
+      - "${ACTFLOW_PORT:-8090}:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

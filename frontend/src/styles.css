@@ -1,0 +1,128 @@
+/* FILE: frontend/src/styles.css
+   Дашборд операционный, не витринный: плотная таблица, спокойный фон, статус — цветом и словом.
+   Деньги моноширинными цифрами, чтобы колонки сумм читались столбиком. */
+
+:root {
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --ink: #1c2430;
+  --muted: #6b7785;
+  --line: #e3e7ec;
+  --accent: #2f62a0;
+  --accent-soft: #eaf1f9;
+  --ok: #1e7a56;
+  --ok-soft: #e6f2ec;
+  --warn: #b07f2e;
+  --warn-soft: #fbf2e2;
+  --danger: #be4b3d;
+  --danger-soft: #f9e9e7;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+}
+
+.money, td.num, th.num { font-variant-numeric: tabular-nums; text-align: right; }
+
+h1 { font-size: 22px; margin: 0; }
+h2 { font-size: 16px; margin: 0 0 12px; }
+
+.topbar {
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  padding: 14px 24px;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+.topbar .brand { font-weight: 700; font-size: 20px; color: var(--accent); }
+.topbar .tagline { color: var(--muted); font-size: 13px; }
+.topbar .spacer { flex: 1; }
+
+.container { padding: 20px 24px 60px; max-width: 1500px; margin: 0 auto; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+/* карточки-показатели */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.kpi { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.kpi .label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.kpi .value { font-size: 22px; font-variant-numeric: tabular-nums; margin-top: 4px; }
+.kpi.danger .value { color: var(--danger); }
+.kpi.ok .value { color: var(--ok); }
+.kpi .sub { font-size: 12px; color: var(--muted); }
+
+/* фильтры */
+.filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.filters > div { display: flex; flex-direction: column; }
+label { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+
+input, select, button {
+  font: inherit;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 6px 9px;
+  background: var(--surface);
+  color: var(--ink);
+}
+input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { background: #27538a; color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+
+/* таблица */
+.table-scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--muted); font-weight: 600; padding: 8px; border-bottom: 1px solid var(--line);
+  white-space: nowrap; position: sticky; top: 0; background: var(--surface);
+}
+td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:hover td { background: #fafbfc; }
+.purpose { color: var(--muted); font-size: 12px; max-width: 320px; }
+
+/* статусы актов: цвет + слово, не только цвет */
+.status { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 12px; white-space: nowrap; }
+.status.closed { background: var(--ok-soft); color: var(--ok); }
+.status.awaiting_signature { background: var(--warn-soft); color: var(--warn); }
+.status.not_sent { background: var(--accent-soft); color: var(--accent); }
+.status.needs_attention { background: var(--danger-soft); color: var(--danger); }
+
+/* способ привязки — всегда виден: пользователь знает, почему оплата в этом проекте */
+.binding { font-size: 11px; color: var(--muted); }
+.binding.unbound { color: var(--danger); }
+.chip { display: inline-block; padding: 1px 7px; border-radius: 20px; background: var(--accent-soft); color: var(--accent); font-size: 11px; margin-right: 4px; }
+.chip.warn { background: var(--warn-soft); color: var(--warn); }
+
+.bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; min-width: 60px; }
+.bar > span { display: block; height: 100%; background: var(--ok); }
+
+.banner { border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; }
+.banner.error { background: var(--danger-soft); color: var(--danger); border: 1px solid var(--danger); }
+.banner.ok { background: var(--ok-soft); color: var(--ok); border: 1px solid var(--ok); }
+
+.muted { color: var(--muted); }
+.empty { text-align: center; color: var(--muted); padding: 30px; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+.tabs button { border: none; background: none; border-radius: 0; padding: 9px 14px; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs button.active { color: var(--ink); border-bottom-color: var(--accent); font-weight: 600; }
+
+@media (max-width: 720px) {
+  .container { padding: 12px; }
+  .purpose { max-width: 160px; }
+}
