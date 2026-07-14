@@ -15,14 +15,15 @@
           <param name="content" type="bytes (PDF с текстовым слоем)" />
         </inputs>
         <outputs>
-          <param name="operations" type="list[RawOperation(date, amount, direction: debit|credit, doc_number, counterparty_name, counterparty_inn, purpose_text, raw_line_no)]" />
+          <param name="owner_inn / owner_account" type="ИНН и счёт владельца выписки — берутся из ШАПКИ (обязательны: на них держится определение направления)" />
+          <param name="operations" type="list[RawOperation(date, amount: Decimal, direction: debit|credit, doc_number, counterparty_name, counterparty_inn, purpose_text, raw_line_no)]" />
         </outputs>
         <errors>
-          <error code="StatementFormatError: PDF не читается / нет текстового слоя / не похоже на выписку" />
+          <error code="StatementFormatError: PDF не читается / нет текстового слоя / нет шапки со счётом владельца / КОНТРОЛЬНАЯ СУММА ПОДВАЛА НЕ СОШЛАСЬ" />
         </errors>
       </contract>
       <interface>
-        <export-parse_statement PURPOSE="bytes → list[RawOperation]; склейка многострочных назначений; чистка колонтитулов («1 / 5»)" />
+        <export-parse_statement PURPOSE="bytes → (owner, list[RawOperation]); склейка назначений; чистка повторяющейся шапки и колонтитулов" />
         <export-RawOperation PURPOSE="Сырая операция выписки" />
         <export-StatementFormatError PURPOSE="Ошибка уровня файла" />
       </interface>
@@ -38,6 +39,9 @@
       <verification-ref>V-M-PARSER</verification-ref>
       <notes>
         <note-1>Парсер за портом: он НЕ знает про проекты и акты. Замена pdfplumber на document-AI (сканы, другие банки) не затрагивает остальной домен.</note-1>
+        <note-2>НАПРАВЛЕНИЕ (на нём держится вся классификация, ошибка = чужой платёж в выручке): владелец берётся из шапки (счёт 40802…, ИНН). В операции две стороны: первая — плательщик (дебет), вторая — получатель (кредит). direction = credit, если счёт владельца во ВТОРОЙ стороне; иначе debit. Дублирующая проверка — по x-координате суммы (колонка «Сумма по дебету» / «по кредиту»).</note-2>
+        <note-3>ЧИСТКА ТЕКСТА до классификации: (а) повторяющаяся шапка на каждой странице (17 строк) и колонтитулы («1 / 5») вырезаются; (б) из назначения отрезается НАЛОГОВЫЙ ХВОСТ по шаблону (Без налога \(НДС\)|НДС не облагается|Без НДС|в т\.?\s?ч\.? НДС.*)$ — иначе слово «налог» в хвосте реальных оплат ломает классификацию (4 оплаты на 211 800 ₽).</note-3>
+        <note-4>САМОПРОВЕРКА ПАРСЕРА по подвалу выписки (бесплатная контрольная сумма): «Количество операций 21 26 47» и «Итого оборотов» дебет 2 437 811,53 / кредит 2 220 310,00. Расхождение числа операций или сумм → StatementFormatError. Парсер обязан доказывать сам себя.</note-4>
       </notes>
     </M-PARSER>
 
@@ -47,15 +51,21 @@
         <inputs>
           <param name="operation" type="RawOperation" />
         </inputs>
+        <inputs>
+          <param name="owner" type="ИНН и счёт владельца выписки (из шапки) — нужны для правила «операция с самим собой»" />
+          <param name="bank_inn" type="ИНН обслуживающего банка (из шапки) — для отсева комиссий и процентов" />
+        </inputs>
         <outputs>
-          <param name="kind" type="client_payment | tax | bank_fee | own_transfer | refund | other — плюс reason (человекочитаемая причина отсева)" />
+          <param name="kind" type="client_payment | tax | bank_fee | bank_interest | own_transfer | refund | salary | rent | contractor_payment | other" />
+          <param name="reason" type="(code, text) — КОД из фиксированного перечисления + человекочитаемый текст; отчёт импорта группируется по коду («Налоги: 4 операции на 256 180 ₽»)" />
         </outputs>
         <errors>
-          <error code="none (классификация всегда даёт результат; сомнительное → other с причиной)" />
+          <error code="none (классификация всегда даёт результат)" />
         </errors>
       </contract>
       <interface>
-        <export-classify_operation PURPOSE="RawOperation → OperationKind + reason" />
+        <export-classify_operation PURPOSE="RawOperation + owner + bank → kind + (code, text)" />
+        <export-OperationKind PURPOSE="Перечисление видов операций" />
       </interface>
       <depends>M-PARSER</depends>
       <target>
@@ -67,7 +77,14 @@
       </observability>
       <verification-ref>V-M-CLASSIFY</verification-ref>
       <notes>
-        <note-1>Правила (порядок важен, первое совпадение побеждает): direction=debit → не оплата (расход); НДФЛ/ЕНС/налог/взнос → tax; комиссия банка/РКО/валютный контроль → bank_fee; «перевод средств предпринимателя на личный счет» → own_transfer; «возврат депозита» → refund; иначе credit с назначением, содержащим «оплата/аванс» → client_payment; остальное → other. Каждая отсеянная операция показывается пользователю с причиной — молчаливого выбрасывания нет.</note-1>
+        <note-1>ЧЁРНЫЙ СПИСОК, НЕ БЕЛЫЙ. Оплата клиента — это ЛЮБОЙ приход от стороннего контрагента, пока не сработало явное исключение. Требовать слово «оплата/аванс» в назначении НЕЛЬЗЯ: реальные оплаты выписки его не содержат («Размещение объявлений на сервисе… по счету № 733» — 54 400 ₽; «Настройка и ведение кампании контекстной рекламы… по счету № 734» — 56 300 ₽).</note-1>
+        <note-2>ПОРЯДОК ПРАВИЛ (первое совпадение побеждает; правила о СТОРОНАХ идут раньше текстовых — текст банк может поменять, реквизиты нет):
+          1. counterparty_inn == owner_inn → own_transfer (закрывает: перевод себе на личный счёт 615 000 ₽; размещение во вклад 936 000 ₽; ВОЗВРАТ ДЕПОЗИТА 810 000 ₽ — он приходит КРЕДИТОМ и без этого правила раздул бы выручку на 58%).
+          2. counterparty_inn == bank_inn → bank_fee (если debit) / bank_interest (если credit — проценты по депозиту 4 490 ₽).
+          3. Получатель — УФК/ФНС/Казначейство (по ИНН или названию) ИЛИ якорные фразы «НДФЛ», «Пополнение ЕНС», «страховые взносы» → tax. Голая подстрока «налог» в правилах ЗАПРЕЩЕНА (ловит хвост «Без налога (НДС)» у реальных оплат).
+          4. direction == debit → расход: зарплата (salary) / аренда (rent) / подрядчик (contractor_payment) / прочее (other) — по назначению.
+          5. Остальной credit → client_payment (причина: «приход от стороннего контрагента»).</note-2>
+        <note-3>Каждая отсеянная операция показывается пользователю с кодом и причиной — молчаливого выбрасывания нет. Виды расходов различаются не ради полноты, а чтобы отчёт импорта читался как понимание бизнеса, а не «23 строки прочего».</note-3>
       </notes>
     </M-CLASSIFY>
 
@@ -79,16 +96,16 @@
         </inputs>
         <outputs>
           <param name="invoice_numbers" type="list[str] — может быть несколько («по счетам № 738, 791 и 792») или пусто" />
-          <param name="contract_number" type="str | None (форматы: «договор № 61», «договор услуг № 318», «981200-АНОН»)" />
-          <param name="service_stage" type="str | None — из словаря услуг (SEO, контекстная реклама, SERM, дизайн, разработка сайта, лендинг, личный кабинет, сопровождение, копирайтинг, SMM, презентация, лицензия, наполнение); None → «этап не определён»" />
+          <param name="contract_number" type="str | None (форматы: «договор № 61», «договор услуг № 318», «договору 981200-АНОН» без №, «№ 17-А/26»)" />
+          <param name="service_stages" type="list[str] — СПИСОК, не одно значение: в реальных платежах услуг бывает две («сопровождение сайта И услуги наполнения», «проектирование И копирайтинг»). Пустой список → «этап не определён»" />
         </outputs>
         <errors>
-          <error code="none (отсутствие реквизита — валидный результат None/[], а не ошибка)" />
+          <error code="none (отсутствие реквизита — валидный результат [], а не ошибка)" />
         </errors>
       </contract>
       <interface>
-        <export-extract_payment_details PURPOSE="Назначение → (счета, договор, услуга)" />
-        <export-SERVICE_DICTIONARY PURPOSE="Словарь типов услуг с ключевыми словами" />
+        <export-extract_payment_details PURPOSE="Назначение → (счета[], договор?, услуги[])" />
+        <export-SERVICE_DICTIONARY PURPOSE="УПОРЯДОЧЕННЫЙ список (фраза → услуга) от длинной фразы к короткой; первое совпадение побеждает — иначе «разработка личного кабинета» матчит и «разработку сайта»" />
       </interface>
       <depends>none</depends>
       <target>
@@ -99,6 +116,12 @@
         <log-prefix>[Extract]</log-prefix>
       </observability>
       <verification-ref>V-M-EXTRACT</verification-ref>
+      <notes>
+        <note-1>ИЗВЛЕЧЕНИЕ ТОЛЬКО ПО ЯКОРЯМ, не «любое число после №». Якоря счёта: счет|счёт|сч\.|счету|счетам|счет-заказ. Якорь договора: договор|договору|договор услуг. Берём токены сразу после якоря до ограничителя (от|за|,|.|;), поддерживаем перечисление («№ 738, 791 и 792»).</note-1>
+        <note-2>ЯВНЫЕ ИСКЛЮЧЕНИЯ (реальные ловушки выписки, каждая — негативный тест): «Сумма 107500-00» и «НДС 6-48» (это не номера); «по реестру № 58» (реестр — не счёт); «Договор РКО № 40802810937184056213» (20 цифр — служебный, не проектный договор); «Счет на оплату № 260722184560» (12-значный номер счёта — ограничение длины его отрезало бы).</note-2>
+        <note-3>Словарь услуг обязан покрывать РЕАЛЬНЫЕ формулировки выписки, а не идеальные: «маркетинговые услуги» (107 500 ₽), «размещение объявлений», «публикация новых материалов на сайте», «подготовка коммерческих текстов» (= копирайтинг), «услуги проектной команды». Тест прогоняет ВСЕ 24 назначения эталонной выписки и ждёт ожидаемую услугу либо явный пустой список.</note-3>
+        <note-4>ИНН бывает 10-значный (юрлица) и 12-значный (ИП — в выписке 4 таких плательщика). Regex \b\d{10}\b|\b\d{12}\b, иначе у ИП отрежутся первые 10 цифр и создастся фантомный клиент.</note-4>
+      </notes>
     </M-EXTRACT>
 
     <M-BINDING NAME="ProjectBinding" TYPE="CORE_LOGIC" LAYER="DOMAIN" ORDER="4" STATUS="planned">
@@ -115,6 +138,11 @@
           <error code="none (неоднозначность — валидный исход: unbound, ждёт менеджера)" />
         </errors>
       </contract>
+      <outputs>
+        <param name="binding" type="(project_id | None, method: by_contract | by_client_service | manual | unbound, conflict_reason: str | None)" />
+        <param name="draft_project" type="Project | None — проект-ЧЕРНОВИК на автосоздание (см. note-2)" />
+        <param name="stage_mismatch" type="bool — привязали по договору, но услуга платежа не совпала с услугой проекта (видимый флаг, не тихая перезапись)" />
+      </outputs>
       <interface>
         <export-bind_payment PURPOSE="Правила привязки, первое сработавшее побеждает" />
         <export-BindingMethod PURPOSE="Способ привязки — ХРАНИТСЯ у оплаты и виден в UI" />
@@ -130,7 +158,10 @@
       </observability>
       <verification-ref>V-M-BINDING</verification-ref>
       <notes>
-        <note-1>Правила по приоритету: (1) by_contract — совпал номер договора у известного проекта; (2) by_client_service — совпали ИНН клиента И тип услуги (единственный кандидат); если кандидатов несколько — НЕ угадываем, уходим в unbound; (3) manual — менеджер привязал руками; (4) unbound — «требует привязки». Способ привязки хранится и показывается: пользователь всегда видит, почему оплата оказалась в этом проекте.</note-1>
+        <note-1>Правила по приоритету: (1) by_contract — совпал номер договора И ИНН КЛИЕНТА (только номера мало: договоры двух-трёхзначные, № 61/№ 95/№ 214 — коллизия между клиентами неизбежна; если договор совпал, а клиент другой → НЕ привязывать, unbound с видимой причиной «договор № X закреплён за другим клиентом»); (2) by_client_service — совпали ИНН клиента И услуга, кандидат ЕДИНСТВЕННЫЙ и услуга в платеже одна; несколько кандидатов или две услуги в платеже → unbound (не угадываем); (3) manual — менеджер привязал руками; (4) unbound — «требует привязки». Способ привязки хранится и показывается всегда.</note-1>
+        <note-2>КУРИЦА-ЯЙЦО (иначе на демо дашборд пуст): при первом импорте справочник проектов пуст, и все оплаты ушли бы в unbound. Правило автосоздания: если у оплаты извлечён номер договора, а проекта с парой (ИНН клиента, договор) нет — создаётся ПРОЕКТ-ЧЕРНОВИК «&lt;Клиент&gt; / договор № N» с флагом auto_created=true, привязка by_contract. Черновик — не угадывание: он помечен, виден и переименовывается менеджером. В эталонной выписке договоры есть у 8 оплат → дашборд сразу непустой.</note-2>
+        <note-3>ПЕРЕИМПОРТ И ПЕРЕСЧЁТ: (а) при совпадении dedup_key существующая оплата НЕ обновляется вообще — поэтому ручная привязка переживает переимпорт по построению; (б) пересчёт привязки после пополнения справочника применяется ТОЛЬКО к оплатам с binding_method == unbound; manual и by_contract не трогаются никогда.</note-3>
+        <note-4>Договор сильнее услуги: если проект найден по договору, а услуга платежа противоречит услуге проекта — by_contract побеждает, но выставляется видимый флаг stage_mismatch. Услуга проекта при этом НЕ перезаписывается.</note-4>
       </notes>
     </M-BINDING>
 
@@ -165,7 +196,9 @@
       </observability>
       <verification-ref>V-M-ACTSTATUS</verification-ref>
       <notes>
-        <note-1>Правила: подписан (и отправлен) → closed; отправлен, не подписан → awaiting_signature, НО если оплате больше sla_days → needs_attention; не отправлен → not_sent, НО если оплате больше sla_days → needs_attention. Приоритет needs_attention выше любого незакрытого. Закрытый акт «просрочкой» не становится: closed окончателен.</note-1>
+        <note-1>Предикаты БУКВАЛЬНО: age = (today − payment_date).days (может быть отрицательным, если оплата будущей датой). closed ⟺ is_signed. needs_attention ⟺ NOT closed AND age &gt; sla_days (строго больше: ровно sla_days — ещё не просрочка). Иначе: is_sent → awaiting_signature, не is_sent → not_sent. Приоритет needs_attention выше любого незакрытого; closed окончателен — просрочка его не меняет.</note-1>
+        <note-2>ИСТОЧНИК «СЕГОДНЯ» (иначе SLA плавает): today = datetime.now(ZoneInfo("Europe/Moscow")).date(). UTC-дата три часа в сутки даёт вчерашний день по Москве и сдвигает границу просрочки. API поддерживает ?as_of=YYYY-MM-DD для демо и тестов.</note-2>
+        <note-3>ДЕМО-НЮАНС: выписка заканчивается 09.08.2026. Если смотреть её «сегодня», дашборд будет сплошь красным (всё просрочено) и потеряет смысл. README задаёт демо-режим as_of на дату выписки, чтобы статусы были разнообразны.</note-3>
       </notes>
     </M-ACTSTATUS>
 
@@ -176,16 +209,16 @@
           <param name="payments" type="iterable[(amount: Decimal, status: ActStatus, project_id, client_inn)]" />
         </inputs>
         <outputs>
-          <param name="totals" type="{total_amount, payments_count, projects_count, closed_amount, open_amount, not_sent_count, awaiting_count, needs_attention_count}" />
-          <param name="by_project" type="[{project, payments_count, total, sent_count, signed_count, closed_ratio}]" />
+          <param name="totals" type="{total_amount, payments_count, projects_count, closed_amount, open_amount, needs_attention_amount, closed_count, not_sent_count, awaiting_count, needs_attention_count}" />
+          <param name="by_project" type="[{project | None («Без проекта»), payments_count, total, sent_count, signed_count, closed_ratio}]" />
         </outputs>
         <errors>
           <error code="none" />
         </errors>
       </contract>
       <interface>
-        <export-summarize PURPOSE="Итоги; инвариант: closed_amount + open_amount == total_amount" />
-        <export-summarize_by_project PURPOSE="Сводка по проектам/юрлицам" />
+        <export-summarize PURPOSE="Итоги дашборда" />
+        <export-summarize_by_project PURPOSE="Сводка по проектам/юрлицам; строка «Без проекта» для непривязанных" />
       </interface>
       <depends>M-ACTSTATUS</depends>
       <target>
@@ -196,6 +229,11 @@
         <log-prefix>[Summary]</log-prefix>
       </observability>
       <verification-ref>V-M-SUMMARY</verification-ref>
+      <notes>
+        <note-1>ОПРЕДЕЛЕНИЯ (иначе цифры карточек врут): open_amount = total_amount − closed_amount; needs_attention явно относится к OPEN (это не отдельная корзина от суммы). not_sent_count НЕ включает просроченные неотправленные — они в needs_attention_count, поэтому в UI подписи «Без акта (в срок)» и «Просрочено», а не «Без акта».</note-1>
+        <note-2>ИНВАРИАНТЫ (тесты): closed_amount + open_amount == total_amount; not_sent + awaiting + needs_attention + closed == payments_count; Σ by_project.total == total_amount (включая строку «Без проекта»).</note-2>
+        <note-3>needs_attention_amount — ключевая цифра руководителя («сколько денег висит просроченным»), в первой версии контракта её не было вовсе. closed_ratio = None при total == 0 (не ноль — деления на ноль нет).</note-3>
+      </notes>
     </M-SUMMARY>
 
     <M-DB NAME="Db" TYPE="DATA_LAYER" LAYER="DATA" ORDER="7" STATUS="planned">
@@ -222,10 +260,14 @@
         <outputs>
           <param name="LegalEntity" type="id, name, inn (unique), ogrn?, bank_account?" />
           <param name="Project" type="id, name, client_id, contract_number?, service_stage?, status" />
-          <param name="Payment" type="id, client_id, project_id?, binding_method, payment_date, amount NUMERIC(14,2), purpose_text, invoice_numbers (JSON), contract_number?, service_stage?, doc_number, dedup_key (unique) — идемпотентность повторной загрузки" />
+          <param name="Payment" type="id, client_id, project_id?, binding_method, stage_mismatch, payment_date, amount NUMERIC(14,2), purpose_text, invoice_numbers (JSON), contract_number?, service_stages (JSON — список!), doc_number, dedup_key (unique)" />
           <param name="Act" type="id, payment_id (1:1), is_sent, sent_at?, is_signed, signed_at?, manager_comment — СТАТУС НЕ ХРАНИТСЯ (вычисляется доменом)" />
         </outputs>
         <errors><error code="IntegrityError на дубликат dedup_key — повторная загрузка выписки не двоит оплаты" /></errors>
+        <invariants>
+          <inv-1>dedup_key = sha256("{date:%Y-%m-%d}|{amount:.2f}|{doc_number.strip()}|{counterparty_inn}|{direction}") — по НОРМАЛИЗОВАННЫМ полям. Ключ обязан быть стабилен между разборами: иначе другое форматирование Decimal («33000.0» vs «33000.00») поедет дублями. Тест: разбор одного PDF дважды даёт идентичные множества ключей.</inv-1>
+          <inv-2>LegalEntity создаётся ТОЛЬКО из операций с kind == client_payment. Иначе в справочник клиентов попадут УФК, обслуживающий банк и получатели зарплаты.</inv-2>
+        </invariants>
       </contract>
       <interface>
         <type-LegalEntity PURPOSE="Юрлицо/клиент" />
@@ -249,9 +291,13 @@
           <param name="HTTP" type="POST /api/import/statement (PDF); GET /api/payments (фильтры+пагинация); PATCH /api/payments/{id}/act; POST /api/payments/bulk-act; PATCH /api/payments/{id}/project; GET /api/summary; GET /api/projects; GET /api/export.csv" />
         </inputs>
         <outputs>
-          <param name="JSON" type="Отчёт импорта (принято/отсеяно с причинами), страницы оплат, сводка, справочники" />
+          <param name="ImportReport" type="ТРИ корзины: принято N / уже было M (по dedup_key) / отсеяно K — отсеянные сгруппированы по коду причины с количеством и суммой («Налоги: 4 операции на 256 180 ₽»)" />
+          <param name="JSON" type="Страницы оплат, сводка, справочники" />
         </outputs>
-        <errors><error code="400 нечитаемый PDF; 404; 422 валидация" /></errors>
+        <errors><error code="400 нечитаемый PDF / контрольная сумма выписки не сошлась; 404; 422 валидация" /></errors>
+        <invariants>
+          <inv-1>today для статусов задаётся API: datetime.now(ZoneInfo("Europe/Moscow")).date(); поддерживается ?as_of=YYYY-MM-DD (демо и тесты). Домен «сегодня» сам не выясняет.</inv-1>
+        </invariants>
       </contract>
       <interface><export-router PURPOSE="APIRouter /api" /></interface>
       <depends>M-PARSER, M-CLASSIFY, M-EXTRACT, M-BINDING, M-ACTSTATUS, M-SUMMARY, M-MODELS, M-DB</depends>

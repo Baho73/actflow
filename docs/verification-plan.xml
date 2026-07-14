@@ -15,8 +15,12 @@
       <required-signals><log-marker>нет (структурный тест)</log-marker></required-signals>
     </VF-001>
     <VF-002 NAME="StatementClassification" USE_CASES="UC-001" DATA_FLOW="DF-IMPORT" PRIORITY="high">
-      <scenario>Импорт эталонной выписки bank_statement.pdf.</scenario>
-      <expected-outcome>Оплаты клиентов распознаны; налоги (НДФЛ, ЕНС), комиссии банка (РКО, валютный контроль), переводы ИП себе, возврат депозита — отсеяны, каждая с причиной. Ни одна посторонняя операция не попала в суммы дашборда.</expected-outcome>
+      <scenario>Импорт эталонной выписки bank_statement.pdf. ЭТАЛОН выведен ручным разбором всех 47 операций и сверен с контрольными суммами подвала выписки (21 дебет / 26 кредит / 47 всего; обороты 2 437 811,53 / 2 220 310,00).</scenario>
+      <expected-outcome>ТОЧНЫЕ ЧИСЛА (доказательство без числа — не доказательство):
+        оплат клиентов ровно 24 на сумму 1 405 820,00 ₽;
+        отсеяно 23 операции, сгруппированные по причинам: налоги 4 (256 180,00) / комиссии банка 3 (502,62) / проценты банка 1 (4 490,00) / переводы себе 2 (615 000,00) / размещение во вклад 1 (936 000,00) / возврат депозита себе 1 (810 000,00 — приходит КРЕДИТОМ) / зарплата 4 (161 410,00) / аренда 2 (58 600,00) / подрядчики 5 (410 118,91).
+        Сходимость: 2 220 310,00 (весь кредит) − 810 000,00 − 4 490,00 = 1 405 820,00.
+        Ни одна посторонняя операция не попала в суммы дашборда; ни одна реальная оплата не потеряна (в частности: 4 оплаты с хвостом «Без налога (НДС)» на 211 800 ₽ и 2 оплаты СИГМА-МАРКЕТ без слова «оплата» на 110 700 ₽ — распознаны как client_payment).</expected-outcome>
       <required-signals>
         <log-marker>[Api][import_statement][BLOCK_IMPORT_STATEMENT]</log-marker>
       </required-signals>
@@ -58,9 +62,11 @@
       <test-files><file>backend/tests/test_domain_classify.py</file></test-files>
       <module-checks><check-1>cd backend &amp;&amp; python -m pytest tests/test_domain_classify.py -q</check-1></module-checks>
       <scenarios>
-        <scenario-1 kind="success">Каждый тип из реальной выписки классифицируется верно: «Оплата по счету № 746 … за настройку Директа» → client_payment; «НДФЛ по расчету» → tax; «Пополнение ЕНС» → tax; «Комиссия за перечисления по зарплатному договору» → bank_fee; «Комиссия … агента валютного контроля» → bank_fee; «Перевод средств предпринимателя на личный счет» → own_transfer; «Возврат депозита по договору» → refund.</scenario-1>
-        <scenario-2 kind="success">Дебетовая операция никогда не client_payment.</scenario-2>
-        <scenario-3 kind="success">У каждой отсеянной операции есть человекочитаемая причина.</scenario-3>
+        <scenario-1 kind="success">Правила о сторонах срабатывают раньше текстовых: ИНН контрагента == ИНН владельца → own_transfer (возврат депозита 810 000 ₽, приходящий КРЕДИТОМ, не попадает в выручку; размещение во вклад 936 000 ₽ тоже); контрагент = обслуживающий банк → bank_fee/bank_interest (проценты 4 490 ₽ не становятся «оплатой клиента»); получатель УФК → tax.</scenario-1>
+        <scenario-2 kind="failure">РЕГРЕССИЯ (дефект, найденный до кода): назначение с хвостом «Без налога (НДС).» НЕ классифицируется как tax. Реальные оплаты: ЛЕДНИК-СТАРТ 33 000, ИНЖЕНЕРНЫЙ КОНТУР 45 000, КОСАРЕВА 64 800, ОРЛОВ 69 000 — все client_payment (иначе 211 800 ₽ уедут в налоги).</scenario-2>
+        <scenario-3 kind="failure">РЕГРЕССИЯ: оплата БЕЗ слова «оплата/аванс» в назначении всё равно client_payment. Реальные: СИГМА-МАРКЕТ «Размещение объявлений… по счету № 733» (54 400) и «Настройка и ведение кампании контекстной рекламы… по счету № 734» (56 300).</scenario-3>
+        <scenario-4 kind="success">Дебетовая операция никогда не client_payment; расходы различаются: salary (4), rent (2), contractor_payment (5).</scenario-4>
+        <scenario-5 kind="success">У каждой отсеянной операции есть КОД причины и текст; отчёт группируется по коду с количеством и суммой.</scenario-5>
       </scenarios>
     </V-M-CLASSIFY>
 
@@ -80,11 +86,13 @@
       <test-files><file>backend/tests/test_domain_binding.py</file></test-files>
       <module-checks><check-1>cd backend &amp;&amp; python -m pytest tests/test_domain_binding.py -q</check-1></module-checks>
       <scenarios>
-        <scenario-1 kind="success">Совпал договор → by_contract.</scenario-1>
-        <scenario-2 kind="success">Договора нет, но клиент+услуга дают ЕДИНСТВЕННОГО кандидата → by_client_service.</scenario-2>
-        <scenario-3 kind="success">Несколько кандидатов → unbound (не угадываем).</scenario-3>
-        <scenario-4 kind="success">Нет данных → unbound, «требует привязки».</scenario-4>
-        <scenario-5 kind="success">Ручная привязка менеджером → manual, переживает переимпорт.</scenario-5>
+        <scenario-1 kind="success">Совпал договор И ИНН клиента → by_contract.</scenario-1>
+        <scenario-2 kind="failure">Договор совпал, но клиент ДРУГОЙ → unbound с причиной «договор № X закреплён за другим клиентом» (номера договоров двух-трёхзначные, коллизии неизбежны — тихая привязка запрещена).</scenario-2>
+        <scenario-3 kind="success">Договора нет, клиент+услуга дают ЕДИНСТВЕННОГО кандидата и услуга одна → by_client_service.</scenario-3>
+        <scenario-4 kind="success">Несколько кандидатов ИЛИ в платеже две услуги → unbound (не угадываем).</scenario-4>
+        <scenario-5 kind="success">ПУСТОЙ СПРАВОЧНИК (первый импорт): у оплаты есть договор → создаётся проект-черновик auto_created=true, привязка by_contract. На эталонной выписке дашборд после первого импорта НЕ пустой (договоры у 8 оплат).</scenario-5>
+        <scenario-6 kind="success">Ручная привязка переживает переимпорт: повторный импорт не обновляет существующую оплату (dedup_key), пересчёт привязки трогает только unbound.</scenario-6>
+        <scenario-7 kind="success">Привязка по договору при несовпадении услуги → by_contract + видимый флаг stage_mismatch; услуга проекта не перезаписывается.</scenario-7>
       </scenarios>
     </V-M-BINDING>
 
@@ -103,9 +111,10 @@
       <test-files><file>backend/tests/test_domain_summary.py</file></test-files>
       <module-checks><check-1>cd backend &amp;&amp; python -m pytest tests/test_domain_summary.py -q</check-1></module-checks>
       <scenarios>
-        <scenario-1 kind="success">Инвариант: closed_amount + open_amount == total_amount.</scenario-1>
-        <scenario-2 kind="success">Счётчики по статусам в сумме равны числу оплат.</scenario-2>
-        <scenario-3 kind="success">Сводка по проектам: % закрытия = закрытая сумма / сумма оплат.</scenario-3>
+        <scenario-1 kind="success">Инварианты: closed_amount + open_amount == total_amount; not_sent + awaiting + needs_attention + closed == payments_count (closed_count в первой версии контракта отсутствовал — счётчики не сходились).</scenario-1>
+        <scenario-2 kind="success">needs_attention относится к OPEN, а не к отдельной корзине; not_sent_count НЕ включает просроченные неотправленные.</scenario-2>
+        <scenario-3 kind="success">Σ by_project.total == total_amount, включая строку «Без проекта» для непривязанных оплат.</scenario-3>
+        <scenario-4 kind="success">closed_ratio == None при total == 0 (деления на ноль нет); needs_attention_amount присутствует — ключевая цифра руководителя.</scenario-4>
       </scenarios>
     </V-M-SUMMARY>
 
