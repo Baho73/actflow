@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# IDE / OS
+.idea/
+.vscode/
+Thumbs.db
+
+# Claude Code local
+.claude/settings.local.json
+
+# env / секреты
+.env
+.cred
+
+# рабочие черновики
+-=letter=-.txt
+
+# исходные материалы ТЗ (скачанные), кроме самой выписки в корне
+_source/

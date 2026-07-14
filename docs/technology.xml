@@ -1,0 +1,54 @@
+<TechnologyStack VERSION="1.0.0">
+  <StackChoice>
+    <preferred-by-client>Laravel + Vue + MySQL/PostgreSQL</preferred-by-client>
+    <chosen>FastAPI (Python 3.12) + React 18 + PostgreSQL 16</chosen>
+    <rationale>ТЗ прямо допускает другой стек при объяснении выбора и перечисляет FastAPI и React среди допустимых. Выбор продиктован сутью задачи: ядро — разбор PDF-выписки, классификация операций и правила привязки к проектам. Это работа с текстом и данными, где Python-экосистема (pdfplumber, Decimal, pytest) даёт кратчайший путь к надёжному, покрытому тестами домену. Бизнес-логика вынесена в чистый слой без зависимостей от фреймворка, поэтому перенос на Laravel/Vue при необходимости затрагивает только транспорт и отображение.</rationale>
+  </StackChoice>
+
+  <Runtime>Python 3.12 (backend), Node 22 (frontend build)</Runtime>
+  <Framework>FastAPI 0.115.x, React 18 + Vite 6 + TypeScript</Framework>
+
+  <Dependencies>
+    <dep name="fastapi" purpose="HTTP API, валидация через Pydantic v2" />
+    <dep name="uvicorn" purpose="ASGI-сервер" />
+    <dep name="sqlalchemy" version="2.0.x" purpose="ORM + Core для агрегаций" />
+    <dep name="psycopg" version="3.2.x" purpose="Драйвер PostgreSQL" />
+    <dep name="pydantic" version="2.x" purpose="Схемы API, Decimal-валидация" />
+    <dep name="pdfplumber" purpose="Извлечение текста из PDF-выписки с сохранением строк; детерминированно, без ML и GPU — проверяющий разворачивает одной командой" />
+    <dep name="react" version="18.x" purpose="SPA" />
+    <dep name="recharts" version="2.x" purpose="Графики сводки" />
+    <dep name="postgresql" version="16-alpine" purpose="Хранилище; статусы актов переживают перезапуск" />
+    <dep name="nginx" version="1.27-alpine" purpose="Единый origin: / → SPA, /api → backend" />
+  </Dependencies>
+
+  <ParsingStrategy>
+    <mvp>Детерминированный парсер: pdfplumber извлекает текст, правила (regex + словарь услуг) классифицируют операцию и вытаскивают реквизиты. Никакого ML: выписка имеет текстовый слой, а проверяющему не нужен GPU и веса моделей.</mvp>
+    <scaling>Для реальных выписок разных банков и сканов путь масштабирования описан в DECISIONS: слой распознавания заменяется на document-AI (Docling / VLM-парсер), интерфейс домена (список операций) не меняется — парсер за портом.</scaling>
+  </ParsingStrategy>
+
+  <Testing>
+    <domain-level>
+      <command>cd backend &amp;&amp; python -m pytest tests/test_domain_*.py -q</command>
+      <focus>Чистая логика без БД: классификация операций, извлечение реквизитов, правила привязки, матрица статусов актов</focus>
+    </domain-level>
+    <api-level>
+      <command>cd backend &amp;&amp; python -m pytest -q</command>
+      <focus>API через TestClient на SQLite in-memory: фильтры, сводка, отметки актов, экспорт</focus>
+    </api-level>
+    <e2e-level>
+      <command>docker compose up -d --build; загрузка bank_statement.pdf; проверка сводки и статусов</command>
+      <focus>Реальный PostgreSQL и nginx; персистентность статусов актов</focus>
+    </e2e-level>
+    <mocking-policy>Фейковая БД — SQLite in-memory через ту же схему. Домен тестируется вообще без БД (он её не знает).</mocking-policy>
+  </Testing>
+
+  <Observability>
+    <logger>stdlib logging, формат [Module][function][BLOCK_NAME]</logger>
+    <required-fields>operation_id, payment_id (где применимо)</required-fields>
+    <redaction>Не логировать полные номера счетов и банковские реквизиты контрагентов</redaction>
+  </Observability>
+
+  <DeliveryShape>
+    <shape>docker compose: nginx (единый origin) → frontend static + backend :8000 (/api), postgres:16 с named volume. Деплой на собственный Linux-сервер, публичная ссылка для заказчика.</shape>
+  </DeliveryShape>
+</TechnologyStack>
