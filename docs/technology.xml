@@ -14,7 +14,7 @@
     <dep name="sqlalchemy" version="2.0.x" purpose="ORM + Core для агрегаций" />
     <dep name="psycopg" version="3.2.x" purpose="Драйвер PostgreSQL" />
     <dep name="pydantic" version="2.x" purpose="Схемы API, Decimal-валидация" />
-    <dep name="pdfplumber" purpose="Извлечение текста из PDF-выписки с сохранением строк; детерминированно, без ML и GPU — проверяющий разворачивает одной командой" />
+    <dep name="pypdf" purpose="Извлечение текста из PDF-выписки; детерминированно, без ML и GPU — проверяющий разворачивает одной командой. Выбран после того, как pdfplumber на этой выписке терял часть текстового слоя (не извлекались ИНН и названия сторон) — зафиксировано в DECISIONS." />
     <dep name="react" version="18.x" purpose="SPA" />
     <dep name="recharts" version="2.x" purpose="Графики сводки" />
     <dep name="postgresql" version="16-alpine" purpose="Хранилище; статусы актов переживают перезапуск" />
