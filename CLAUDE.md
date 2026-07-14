@@ -33,11 +33,31 @@ actflow, payments, projects, legal-entity, acts, closing-documents, bank-stateme
 
 ## Окружение и деплой
 
-- Разработка: Windows 11, Docker Desktop.
+- Разработка: Windows 11, Docker Desktop. Локально: `docker compose up -d --build` → http://localhost:8090
 - Стек: FastAPI + PostgreSQL, React SPA, nginx (единый origin), docker compose.
   Выбор стека обоснован в README (ТЗ предпочитает Laravel+Vue, но прямо разрешает другой с объяснением).
-- Деплой: свой Linux-сервер через docker compose, публичная ссылка (реквизиты сервера — см. ниже, заполнить перед деплоем).
 - Python: UTF-8 явно, `Decimal` для денег, никакого float.
+
+### Прод-сервер (деплой выполнен)
+
+- **Публичная ссылка: http://46.149.69.151:8090**
+- SSH: `ssh foxear-vps` (хост 46.149.69.151, root; ключ `D:/Python/Fox_Ear/.ssh/deploy_key`, запись уже в `~/.ssh/config`).
+- Путь на сервере: `/opt/actflow`. Деплой: `bash deploy/deploy.sh` (см. `deploy/README.md`).
+- **ВНИМАНИЕ: сервер боевой** — на нём живут foxear (Caddy на 80/443, api, bot, postgres, redis, minio, воркеры)
+  и defectmaster. ActFlow намеренно занял свободный порт 8090 и НЕ трогает Caddy и чужие сервисы.
+- Известная чужая проблема (не наша): контейнер `defectmaster-minio` в вечном рестарте (6213 перезапусков
+  с 20.06) — не может писать в свой `/data` (права). К ActFlow отношения не имеет.
+- HTTPS-домен не подключён: wildcard `*.foxear.ru` отсутствует, нужна A-запись `actflow.foxear.ru → 46.149.69.151`,
+  после чего добавить в Caddyfile `reverse_proxy localhost:8090`.
+
+### Обновление кода на сервере
+
+```
+git archive --format=tar.gz -o %TEMP%\actflow.tar.gz HEAD
+scp %TEMP%\actflow.tar.gz foxear-vps:/tmp/actflow.tar.gz
+ssh foxear-vps 'tar xzf /tmp/actflow.tar.gz -C /opt/actflow && cd /opt/actflow && ACTFLOW_PORT=8090 bash deploy/deploy.sh'
+```
+Код попадает в образ через `COPY`, поэтому обновление всегда с `--build` (это внутри deploy.sh).
 
 ## Primary Artifacts
 
