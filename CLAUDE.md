@@ -40,15 +40,17 @@ actflow, payments, projects, legal-entity, acts, closing-documents, bank-stateme
 
 ### Прод-сервер (деплой выполнен)
 
-- **Публичная ссылка: http://46.149.69.151:8090**
+- **Публичная ссылка: https://actflow.foxear.ru** (прямой доступ по http://46.149.69.151:8090 тоже жив).
 - SSH: `ssh foxear-vps` (хост 46.149.69.151, root; ключ `D:/Python/Fox_Ear/.ssh/deploy_key`, запись уже в `~/.ssh/config`).
 - Путь на сервере: `/opt/actflow`. Деплой: `bash deploy/deploy.sh` (см. `deploy/README.md`).
 - **ВНИМАНИЕ: сервер боевой** — на нём живут foxear (Caddy на 80/443, api, bot, postgres, redis, minio, воркеры)
   и defectmaster. ActFlow намеренно занял свободный порт 8090 и НЕ трогает Caddy и чужие сервисы.
 - Известная чужая проблема (не наша): контейнер `defectmaster-minio` в вечном рестарте (6213 перезапусков
   с 20.06) — не может писать в свой `/data` (права). К ActFlow отношения не имеет.
-- HTTPS-домен не подключён: wildcard `*.foxear.ru` отсутствует, нужна A-запись `actflow.foxear.ru → 46.149.69.151`,
-  после чего добавить в Caddyfile `reverse_proxy localhost:8090`.
+- HTTPS подключён: A-запись `actflow.foxear.ru → 46.149.69.151`, в `/opt/foxear/Caddyfile` добавлен блок
+  `actflow.foxear.ru { reverse_proxy actflow-web-1:80 }`, контейнер `actflow-web-1` подключён к сети `foxear_default`.
+  Сертификат Let's Encrypt Caddy выпустил и продлевает сам. Бэкап конфига: `/opt/foxear/Caddyfile.bak.20260714-104916`.
+  Правки Caddy только через `caddy validate` + `caddy reload` (без рестарта — foxear не должен прерываться).
 
 ### Обновление кода на сервере
 
